@@ -1,0 +1,17 @@
+[project]
+name = "kedou-bridge"
+version = "1.0.0"
+description = "Expose ComfyUI workflows as clickable \"apps\" over a local HTTP API: list apps, fetch per-app parameters, convert UI graphs to API format, browse media, and pack workflows into .kapp.json app bundles. Ships with a thumbnail media loader node."
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+classifiers = [
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Repository = "https://github.com/1814772011/ComfyUI_KeDou"
+"Bug Tracker" = "https://github.com/1814772011/ComfyUI_KeDou/issues"
+
+[tool.comfy]
+PublisherId = "1814772011"
+DisplayName = "KeDou Bridge · 蝌蚪桥接"
