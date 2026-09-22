@@ -1,0 +1,8 @@
+# Python 字节码
+__pycache__/
+*.pyc
+
+# 备份与临时产物
+*.bak
+*.bak-*
+_newver/
