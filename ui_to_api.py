@@ -7,8 +7,8 @@ ui_to_api.py —— ComfyUI「界面格式工作流」转「API 格式」
 服务端没有现成转换路由，所以这里自己实现。
 
 设计原则（关键）：
-  * 一个节点类型如果**不在 /object_info 里**，它就不是真实节点（PrimitiveNode /
-    Reroute / Note / rgthree 的 Fast Muter 之类都属此类）→ **溶解掉**，把连线接续上去。
+  * 一个节点类型如果不在 /object_info 里，它就不是真实节点（PrimitiveNode /
+    Reroute / Note / rgthree 的 Fast Muter 之类都属此类）→ 溶解掉，把连线接续上去。
     这样就不需要维护"前端专用节点"名单，跟着 ComfyUI 升级自动正确。
   * 只保留 mode == 0 的节点（静音 mode=2 / 旁路 mode=4 都不进 API 图）。
   * 控件值按 object_info 声明的顺序位置对齐；带 control_after_generate 的
@@ -33,9 +33,9 @@ NON_EXECUTABLE = {"Note", "MarkdownNote", "PreviewAny", "__Reroute"}
 def _is_widget_input(spec) -> bool:
     """spec 形如 [type, opts]；type 为 list（下拉选项）或基础类型时是控件。
 
-    注意：ComfyUI 的 INPUT_TYPES() 返回**元组**，只有经 /object_info 走 JSON 才变列表。
+    注意：ComfyUI 的 INPUT_TYPES() 返回元组，只有经 /object_info 走 JSON 才变列表。
     只认 list 的话，服务端构建 object_info 时这里会全部返回 False ——
-    后果是**所有节点的控件值全丢、只剩连线**，极其隐蔽。
+    后果是所有节点的控件值全丢、只剩连线，极其隐蔽。
     """
     if not isinstance(spec, (list, tuple)) or not spec:
         return False
@@ -85,9 +85,9 @@ def _linked_input_names(node: dict) -> dict[str, str]:
     """
     返回 {输入名: 来源控件名}，用于识别「控件被真正转成了输入」。
 
-    注意：新版 ComfyUI 里下拉/数值控件**本来就会在 inputs 里带一个 widget 引用**，
+    注意：新版 ComfyUI 里下拉/数值控件本来就会在 inputs 里带一个 widget 引用，
     但那只是控件的常规槽位，不代表被转成了输入。
-    只有当该槽位**确实有连线**时，才算「控件被转成了输入」。
+    只有当该槽位确实有连线时，才算「控件被转成了输入」。
     """
     out = {}
     for slot in node.get("inputs") or []:

@@ -10,7 +10,7 @@ ComfyUI_KeDou —— 修图工坊 · ComfyUI 桥接（v2：直接对接原生「
       * extra.linearMode == true
       参数定义 = extra.linearData.inputs，形如 [["<图uuid>:<节点id>:<控件名>", "<控件名>"], ...]
       输出     = extra.linearData.outputs（节点 id 列表）
-自研应用包：*.kapp.json（kedou_app: 1）—— graph 直接存 **API 格式**（无 UI→API 翻译、
+自研应用包：*.kapp.json（kedou_app: 1）—— graph 直接存 API 格式（无 UI→API 翻译、
       无 widgets_values 位置对位），params 逐条声明 node+input+widget，outputs 显式列出。
       同 stem 同时存在 .kapp.json 与 .app.json 时 kapp 优先。打包：POST /ps/pack。
 
@@ -25,17 +25,17 @@ ComfyUI_KeDou —— 修图工坊 · ComfyUI 桥接（v2：直接对接原生「
       POST /ps/pack/save               -> {ok,file,param_count,node_count}（kapp 打包面板专用：前端已构好 API 图，只校验+落盘）
 
 自定义节点（NODE_CLASS_MAPPINGS）：
-      KedouMediaLoader  蝌蚪媒体组 —— 一个加载器收多张图 → 一次输出一批（batch=N）
+      KedouImageLoader  蝌蚪图片加载器 —— 在面板上多选图片，一张图一路 IMAGE 输出（最多 10 路）
       节点上的缩略图网格由前端扩展 web/kedou_media.js 渲染，
-      值回写到 files 控件（JSON 数组），所以启动器 / PS 插件也能直接驱动它。
+      值以 JSON 写入隐藏控件 media_state，故启动器 / PS 插件也可直接驱动。
 
 安装：把整个 ComfyUI_KeDou/ 文件夹放进 <ComfyUI>/custom_nodes/ 即可（自包含，一个文件夹就是全部）：
       ComfyUI_KeDou/
           __init__.py          本文件（HTTP 路由 + 自定义节点）
           ui_to_api.py         界面格式 → API 格式转换（由 _load_converter 就地加载）
           web/kedou_media.js   节点前端扩展（媒体组缩略图网格 + 媒体选择器）
-      ⚠️ 插件名 = **目录名** ComfyUI_KeDou。启动器的插件白名单按 os.listdir() 的原始条目名
-      匹配，所以插件预设里要写 `ComfyUI_KeDou`（早期散装形态是 `ps_app_bridge.py`，改名时启动器的插件预设条目要同步改）。
+      插件名取目录名 ComfyUI_KeDou。启动器的插件白名单按 os.listdir() 的原始条目名
+      匹配，故插件预设里应写 `ComfyUI_KeDou`。
       改完重启 ComfyUI。
 """
 
@@ -65,11 +65,11 @@ def _find_comfy_root() -> str:
     """
     从本文件往上找到「包含 custom_nodes 的那一层」= ComfyUI 根目录。
 
-    ⚠️ 不能写死 os.path.dirname(os.path.dirname(__file__))：
-       散装单文件形态（custom_nodes/x.py）算出来正好是 ComfyUI，
-       但**文件夹包形态**（custom_nodes/x/__init__.py）会算成 custom_nodes，
+    不能写死 os.path.dirname(os.path.dirname(__file__))：
+       单文件插件形态（custom_nodes/x.py）算出来正好是 ComfyUI，
+       但文件夹包形态（custom_nodes/x/__init__.py）会算成 custom_nodes，
        于是 WORKFLOW_DIR 指向不存在的地方 → /ps/apps 返回空列表、
-       启动器和 PS 插件上「一个应用都没有」，而且**不报任何错**（最难查的那种）。
+       启动器和 PS 插件上「一个应用都没有」，且不报任何错误（最难查的情况）。
     """
     here = os.path.dirname(os.path.abspath(__file__))
     for _ in range(6):
@@ -85,17 +85,17 @@ def _find_comfy_root() -> str:
 COMFY_ROOT = _find_comfy_root()
 WORKFLOW_DIR = os.path.join(COMFY_ROOT, "user", "default", "workflows")
 if not os.path.isdir(os.path.join(COMFY_ROOT, "custom_nodes")):
-    # 自己会喊的探针：根目录推断错了当场可见，别等到「应用列表莫名空空」
+    # 启动自检：根目录推断错误时立即报出，避免应用列表为空却无任何提示
     print("[KeDou] 警告：ComfyUI 根目录推断可能不对 -> %s" % COMFY_ROOT)
 
 # 前端扩展目录 —— 本插件是「一个文件夹」的包形态，所以就是包内的 web/。
 # 访问路径 = /extensions/ComfyUI_KeDou/kedou_media.js
-#   命名取**模块名**（= 目录名 ComfyUI_KeDou），不是 WEB_DIRECTORY 的名字。
+#   命名取模块名（= 目录名 ComfyUI_KeDou），不是 WEB_DIRECTORY 的名字。
 # 为什么现在能安心用 "./web"：
 #   包形态下 nodes.py 的 module_dir = 包目录本身，而目录插件只加载 __init__.py，
 #   包内的 .py / .js 不会被当插件重复加载。
-#   ⚠️ 曾经的坑（散装单文件形态）：module_dir = custom_nodes/ 本身，
-#   "./web" 会落到**所有单文件插件共享**的 custom_nodes/web，所以才必须另起目录。
+#   注意：单文件插件形态下 module_dir 为 custom_nodes/ 本身，"./web" 会指向
+#   所有单文件插件共享的 custom_nodes/web，该形态需另起目录。
 WEB_DIRECTORY = "./web"
 
 # 这些节点类型代表"要一张图进来"
@@ -103,7 +103,7 @@ IMAGE_LOADERS = {
     "LoadImage", "LoadImageMask", "LoadImageOutput", "ImageOnlyCheckpointLoader",
     "Load Image (Base64)", "ETN_LoadImageBase64", "LoadImageFromUrl",
 }
-# 管道参数：不该出现在面板上（工作流作者的事，不是修图师的事）
+# 管道参数：不暴露到面板（属于工作流作者范畴，非面向用户的可调项）
 NOISE_INPUTS = {"filename_prefix"}
 
 # 给面板用的中文类型名
@@ -307,7 +307,7 @@ def build_spec(path: str, object_info: dict = None) -> dict:
         params.append(item)
 
     # 标签去重：多个字段同名时自动加序号，免得面板上出现一排一模一样的输入框。
-    # （根治办法是在 ComfyUI 里给节点起有意义的名字，这里只是兜底）
+    # （在 ComfyUI 中为节点起有意义的名称可从根本上避免；此处为兜底）
     dup = {}
     for p in params:
         if not p.get("hidden"):
@@ -383,9 +383,9 @@ _WIDGET_TYPES = {"INT", "FLOAT", "STRING", "BOOLEAN", "COMBO"}
 
 
 def _is_widget_spec(spec) -> bool:
-    # 注意：ComfyUI 的 INPUT_TYPES() 惯例返回**元组** ("STRING", {...})，
+    # 注意：ComfyUI 的 INPUT_TYPES() 惯例返回元组 ("STRING", {...})，
     # 只有经 /object_info 走 JSON 序列化后才变成列表。两种都要认 ——
-    # 只认 list 的话，服务端构建 object_info 时会把**所有控件判为无效**，
+    # 只认 list 的话，服务端构建 object_info 时会把所有控件判为无效，
     # 静默退化成 STRING（表现为：数值框变成单行文本、multiline 丢失）。
     if not isinstance(spec, (list, tuple)) or not spec:
         return False
@@ -438,15 +438,12 @@ def _widget_index(object_info: dict, class_type: str, name: str):
 
 # ------------------------------------------------- 控件规格（通用，零应用定制）
 #
-# 设计原则：**插件是纯通道。**
+# 设计原则：插件是纯通道。
 #   应用由任何人用 ComfyUI 的 App Builder 搭好，接上就能用；
 #   不允许出现"针对某个应用/某个特定节点"的特判（那等于插件作者在替别人接线）。
 #
-# 所以这里只做**类型驱动**的通用推断：控件长什么样，完全由节点自己声明的规格决定。
+# 所以这里只做类型驱动的通用推断：控件长什么样，完全由节点自己声明的规格决定。
 # 面板怎么画（文本框/滑杆/下拉/分段选择器）属于"呈现"，归 PS 侧按 spec 自行决定。
-#
-# 备注：曾经写过一个"提示词库识别"（专门认 CR 的 text1..textN 切换器）的特例实现，
-# 已删除 —— 换个人用别的切换器节点就失效，且通用规则已能覆盖该场景。
 
 
 def _find_spec(object_info: dict, class_type: str, name: str):
@@ -481,7 +478,7 @@ def widget_spec(object_info: dict, class_type: str, name: str) -> dict:
     elif isinstance(first, str):
         out["type"] = first
         # 自定义类型名也可能带选项列表（如 ResolutionSelector 的 aspect_ratio）：
-        # 有 choices/options 就一并给出，别让下拉在应用里退化成输入框
+        # 有 choices/options 就一并给出，避免下拉在应用中退化为输入框
         ch = opts.get("choices") or opts.get("options")
         if isinstance(ch, (list, tuple)) and ch:
             vals = [str(x) for x in ch]
@@ -572,8 +569,8 @@ def update_values(app_id: str, values: dict, object_info: dict = None) -> dict:
 
 # ------------------------------------------------- 出图：应用 -> 可提交的 API 图
 # 分工原则（保持桥接极薄）：
-#   桥接只做"需要 ComfyUI 内部知识"的事 —— 应用发现、参数翻译、界面格式转 API 格式。
-#   上传 / 提交 / 取结果全部走 ComfyUI **原生**接口，桥接不重复实现：
+#   桥接只做需要 ComfyUI 内部知识的事 —— 应用发现、参数翻译、界面格式转 API 格式。
+#   上传 / 提交 / 取结果全部走 ComfyUI 原生接口，桥接不重复实现：
 #     POST /upload/image (multipart, subfolder=ps_upload, overwrite=true)
 #     POST /prompt       API 图
 #     GET  /history/{id} GET /view
@@ -658,7 +655,7 @@ def build_graph(app_id: str, values: dict = None, object_info: dict = None) -> d
     # 把值注入 API 图（API 图里的输入名就是控件名）
     applied, skipped, failed = _inject_values(graph, values)
 
-    # 老老实实报出"被溶解掉的未知节点"，别静默（这类多半是没装的自定义节点）
+    # 如实报出"被溶解掉的未知节点"，不静默（这类多半是未安装的自定义节点）
     sub_ids = set(str(s.get("id")) for s in
                   ((wf.get("definitions") or {}).get("subgraphs") or []))
     front_ok = {"PrimitiveNode", "Reroute", "Note", "MarkdownNote", "__Reroute"}
@@ -685,9 +682,9 @@ def build_graph(app_id: str, values: dict = None, object_info: dict = None) -> d
 
 # ---------------------------------------------------------------- 自研应用包（kapp）
 #
-# 官方应用模式（linearMode）的税：参数靠 linearData 勾选（勾到哪个控件就叫什么名）、
+# 官方应用模式（linearMode）的三项额外成本：参数靠 linearData 勾选（勾到哪个控件就叫什么名）、
 # widgets_values 按位置对位、每次运行都要 UI→API 翻译。kapp 把三样全部显式化：
-#   * graph 直接存 **API 格式**（「导出 API 格式」同构）—— 没有翻译、没有位置对位；
+#   * graph 直接存 API 格式（「导出 API 格式」同构）—— 没有翻译、没有位置对位；
 #   * params 逐条声明 node + input + widget —— 插件不推断、不特判；
 #   * outputs 显式列出 SaveImage 类节点 id。
 # 打包：POST /ps/pack（source = 任意 UI 格式工作流，含 .app.json）。
@@ -848,8 +845,8 @@ def _find_workflow_file(name: str):
 
 def _suggest_widget(object_info: dict, class_type: str, name: str) -> str:
     """打包候选的建议 widget（按节点声明推断，仅两处品牌特判：本家节点）。
-    自定义类型名不看名字猜：声明 cfg 里带 choices/options 选项列表的就是下拉 ——
-    猜成 text 的话，应用里下拉会退化成输入框（ResolutionSelector 的 aspect_ratio 实测）。"""
+    自定义类型名不按名称推断：声明 cfg 里带 choices/options 选项列表的即为下拉 ——
+    判为 text 会使应用中的下拉退化为输入框（ResolutionSelector 的 aspect_ratio 即如此）。"""
     if class_type == "KedouImageLoader" and name == "media_state":
         return "kedou_media"
     if class_type == "LoadImage" and name == "image":
@@ -996,13 +993,13 @@ def pack_app(source: str, params: list, name: str = None, desc: str = "") -> dic
 #
 # 与 pack_app（按文件名读取 UI 工作流、服务端做 UI→API 转换）不同，这个入口给
 # 「打包成应用」前端面板用：面板已经用 app.graphToPrompt() 拿到 API 格式图，
-# 直接把成品 kapp 发过来。所以这里**只做校验 + 落盘**，不再翻译、不再碰工作流文件。
+# 直接把成品 kapp 发过来。所以这里只做校验 + 落盘，不再翻译、不再碰工作流文件。
 # 桥接仍是纯通道：声明是什么就是什么，不针对任何应用做特判。
 
 def _kapp_validate(graph: dict, params: list, object_info: dict) -> list:
     """kapp 落盘前的完整性校验（打包面板 / 服务端打包共用）。返回错误列表（空 = 通过）。
 
-    三个真实踩过的坑，全部在这里拦下（诚实报错，不静默落一个坏包）：
+    三个已确认的问题，全部在这里拦截（如实报错，不静默落一个坏包）：
       1. 画布上「转换为输入」的 widget 连线悬空 → graphToPrompt 把整个输入键丢掉
          （Z-IMAGE 的 width/height 就这么没的），参数还在面板上能勾；
       2. 参数勾在了连线上 → 运行时注值要么报「没有这个输入名」，要么把连线写死；
@@ -1204,20 +1201,20 @@ if _HAS_COMFY:
 
 
 # ---------------------------------------------------------------- 图片加载器
-# 一个节点，只做图片：**自绘的多选面板**（不是官方那套 image_upload 控件）。
+# 一个节点，只做图片：自绘的多选面板（不是官方那套 image_upload 控件）。
 #
-# 为什么不用官方控件（读前端源码确认，不是猜）：
-#   * 官方 image_upload 控件**写死单选** —— WidgetSelect bundle 里 multiselect 出现 0 次；
-#   * 它还自带「遮罩编辑器 / 下载」两个按钮，用户明确说多余。
-# 所以照参考实现（MiniMaxH3-Easy 媒体加载器）的做法：唯一控件是一个隐藏的
-# media_state(JSON)，清单由自绘面板管理；要的媒体在这里**只解码一次**。
+# 不使用官方 image_upload 控件的原因（依据前端 WidgetSelect bundle 的实现）：
+#   * 该控件仅支持单选 —— WidgetSelect bundle 里 multiselect 出现 0 次；
+#   * 它还自带「遮罩编辑器 / 下载」两个按钮，与本节点职责重叠。
+# 因此参照 MiniMaxH3-Easy 媒体加载器：唯一控件为一个隐藏的
+# media_state(JSON)，清单由自绘面板管理；要的媒体在这里仅解码一次。
 #
 # media_state 形如 {"images":[{"filename":"a.png"}, ...]}，只接受相对路径
 # （拒绝绝对路径与 ..），input 找不到会再试 output —— 保证工作流文件可移植、
 # ComfyUI 的目录保护仍然管用。
 #
 # 输出：选几张就几路 IMAGE（最多 IMG_SLOTS 路），由前端按数量重建；
-# 空槽给 None，**绝不抛错** —— ComfyUI 会把所有输出都算一遍哪怕没接线。
+# 空槽给 None，不抛异常 —— ComfyUI 会把所有输出都算一遍哪怕没接线。
 
 IMG_SLOTS = 10
 IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")
@@ -1355,10 +1352,10 @@ class KedouImageLoader:
                 out.append(None)
         out = [x for x in out if x is not None]
         if not out:
-            # 一张都没有：诚实报错（下游拿到 None 只会崩出天书 'NoneType' has no attribute 'shape'）
+            # 无可用图片：抛出明确错误（下游收到 None 会触发 NoneType 属性错误）
             raise ValueError("蝌蚪图片加载器：没有可用的图片 —— 请在加载器/应用面板里先选择图片")
-        # 空槽复用最后一张（不再是 None）：多槽语义 = 第 N 张图；选的图不够时
-        # 复用而不是让下游崩 'NoneType'.shape —— 控制台会提示哪一槽复用了
+        # 空槽复用最后一张：多槽语义为「第 N 张图」，图片不足时复用末张以避免下游
+        # 因 None 报错；控制台会打印实际复用的槽位。
         last = out[-1]
         while len(out) < IMG_SLOTS:
             out.append(last)

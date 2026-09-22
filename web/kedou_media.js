@@ -1,15 +1,15 @@
 // kedou_media.js —— 「蝌蚪图片加载器」节点的前端扩展（自绘多选面板）
 //
-// 为什么不用官方那套 image_upload 控件（读前端 WidgetSelect bundle 确认过）：
-//   * 它**写死单选**（multiselect 在该 bundle 里出现 0 次）；
-//   * 还自带「遮罩编辑器 / 下载」两个按钮，用户明确说多余。
-// 所以照参考实现（MiniMaxH3-Easy 媒体加载器）的做法：唯一控件是隐藏的
-// media_state(JSON)，媒体清单交给这里的自绘面板管理。
+// 不使用官方 image_upload 控件的原因（依据前端 WidgetSelect bundle 的实现）：
+//   * 该控件仅支持单选，bundle 中未出现 multiselect；
+//   * 它还附带「遮罩编辑器 / 下载」两个按钮，与本节点职责重叠。
+// 因此参照 MiniMaxH3-Easy 媒体加载器的做法：唯一控件为隐藏的
+// media_state(JSON)，媒体清单由本文件的自绘面板管理。
 //
 // 面板：媒体资源 N + 上传媒体 / 从库里选 + 图片缩略图网格（序号 + × 移除）；
 //       点缩略图放大预览；底部输出槽按「选了几张」由前端重建（后端声明满 10 个）。
 //
-// ⚠️ media_state 是位置型控件，只能「藏」不能「删」（computeSize = () => [0, -4]），
+// 注意：media_state 是位置型控件，只能隐藏、不可删除（computeSize = () => [0, -4]），
 //    否则节点上的其它控件值会整体错位。
 
 import { app } from "../../scripts/app.js";
@@ -179,7 +179,7 @@ function linksOf(node, index) {
   return Array.isArray(out && out.links) ? out.links.slice() : (out && out.link != null ? [out.link] : []);
 }
 
-// 删槽/重排之后把已有连线的起点槽号重指 —— 不重指，线就会跑到别的口上。
+// 删槽/重排后需重指已有连线的起点槽号，否则连线会落到错误的输入槽。
 // LiteGraph 用 origin_slot；Vue 图适配器用 originSlot / from_slot / fromSlot，四个都写。
 function repointLinks(node) {
   const graph = (node && node.graph) || app.graph;
@@ -693,7 +693,7 @@ function suggestWidget(node, w) {
   if (w.type === "BOOLEAN") return "toggle";
   if (w.type === "COMBO") return "combo";
   // 自定义类型名（如 ResolutionSelector 的 aspect_ratio）：控件对象里有选项列表就是下拉，
-  // 别按类型名猜 —— 猜成 text 的话应用里下拉会退化成输入框
+  // 不应按类型名推断：判为 text 会使应用中的下拉退化为输入框
   const vals = comboValuesOf(w);
   if (vals && vals.length) return "combo";
   return "text";
@@ -723,13 +723,13 @@ function collectCandidates() {
       if (w.name === "kedou_media") continue;       // DOM 控件（媒体选择器 UI 本身），不是值
       if (w.type === "converted-widget" &&
           !(ntype === "KedouImageLoader" && w.name === "media_state")) continue;  // 隐藏格
-      // 已转换为输入且连着上游的 widget：值由上游驱动，打包成可调参数只会在运行时把连线注坏 —— 不给勾
+      // 已转换为输入且连着上游的 widget：值由上游驱动，打包成可调参数会在运行时破坏连线，故不提供勾选
       if (w.type === "converted-widget" && Array.isArray(node.inputs)
           && node.inputs.some((inp) => inp && inp.name === w.name && inp.link != null)) continue;
       const widget = suggestWidget(node, w);
-      // 能力采集与建议类型解耦：选项/范围/多行一律从真机控件对象抓下来存进候选，
-      // 用户手动改控件类型（如文本→下拉）时能力不丢 —— 之前只在建议=combo 时抓，
-      // 自定义类型名的下拉（ResolutionSelector 的 aspect_ratio）就丢成输入框了
+      // 能力采集与建议类型解耦：选项/范围/多行一律从真机控件对象取下来存进候选，
+      // 用户手动改控件类型（如文本→下拉）时能力不丢：仅按建议类型采集时，
+      // 自定义类型名的下拉（ResolutionSelector 的 aspect_ratio）会落为空输入框
       const opt = w.options && typeof w.options === "object" ? w.options : {};
       let min, max, step;
       if (typeof opt.min === "number") min = opt.min;
@@ -844,7 +844,7 @@ function openPackPanel(hostEl) {
     // 侧栏模式：无标题栏/遮罩/Esc，内容直接挂进页签
     panel.append(body, ft);
     try {
-      // 面板自然高度常超页签可视区 —— 让页签容器自己滚，否则「生成应用包」够不着
+      // 面板自然高度常超页签可视区 —— 让页签容器自行滚动，否则「生成应用包」按钮会超出可视范围
       hostEl.style.overflowY = "auto";
       hostEl.style.maxHeight = "100%";
       hostEl.style.boxSizing = "border-box";
@@ -1138,10 +1138,10 @@ async function doGenerate(ctx) {
 
 function mountPackButton() {
   ensurePackCss();   // 必须先注样式：无样式按钮落在 body 末尾，会被 100vh 画布挤出屏幕外
-  // 用户指定：入口放左侧栏 —— 新版前端的官方侧栏页签接口
+  // 入口挂载在左侧栏：新版前端的官方侧栏页签接口
   try {
     if (app.extensionManager && typeof app.extensionManager.registerSidebarTab === "function") {
-      // ⚠️ 本机前端实测：挂载走 e.render(el)（旧文档的 content 字段会被忽略 → 页签空白）。
+      // 注意：挂载使用 e.render(el)，旧文档记载的 content 字段会被忽略，导致页签空白。
       // 两个字段都传，新旧版本通吃。
       const packTabContent = (el) => {
         try { openPackPanel(el); }
@@ -1158,7 +1158,7 @@ function mountPackButton() {
       return;                       // 侧栏挂载成功，不再需要悬浮球/菜单按钮
     }
   } catch (e) { console.warn("[kedou] 侧栏页签挂载失败，退回悬浮球/菜单", e); }
-  // 新版 ComfyUI 前端里 app.ui.menuContainer 是隐藏的遗留兼容壳（按钮挂进去=看不见）。
+  // 新版 ComfyUI 前端里 app.ui.menuContainer 是隐藏的遗留兼容壳（按钮挂进去不会显示）。
   // 规矩：只挂进「真实可见」的容器；都不行就退到永远可见的悬浮 pill。
   function visible(el) {
     if (!el || !el.appendChild) return false;
@@ -1188,7 +1188,7 @@ function mountPackButton() {
   btn.textContent = "打包成应用";
   btn.title = "把当前工作流打包成 kapp 应用";
   btn.onclick = openPackPanel;
-  // 保险：前端框架重渲染可能把外挂按钮抹掉 —— 3 秒后不在文档里就重挂为悬浮 pill
+  // 防御：前端框架重渲染可能移除外挂按钮，3 秒后若不在文档中则重挂为悬浮 pill
   setTimeout(function () {
     if (!document.contains(btn)) {
       const pill = document.createElement("button");
