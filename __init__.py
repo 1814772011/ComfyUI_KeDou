@@ -1355,12 +1355,21 @@ class KedouImageLoader:
 
     @classmethod
     def VALIDATE_INPUTS(cls, media_state="", **_kw):
+        """2026-09-28 改：部分失效放行 —— 与 load() 的容错对齐（失败图占位 None，槽位不错位）。
+        用户清理过输出目录后面板残留旧文件名，旧版一票否决把整个提交拦死；
+        现在只有全部失效才拦（此时才真的没有一张可出）。"""
         state = _media_state_value(media_state)
+        first_err = None
+        missing = 0
         for entry in state["images"]:
             try:
                 _media_input_path(entry["filename"])
             except ValueError as exc:
-                return str(exc)
+                missing += 1
+                if first_err is None:
+                    first_err = str(exc)
+        if state["images"] and missing == len(state["images"]):
+            return first_err or "媒体加载器找不到任何一张面板图片（input / output 都没有）"
         return True
 
     def load(self, media_state=""):
