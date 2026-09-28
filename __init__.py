@@ -929,7 +929,7 @@ def pack_app(source: str, params: list, name: str = None, desc: str = "") -> dic
     # 完整性校验（与 save_kapp 同一标准）：转换后的图 + 勾选参数一起验，坏包不落盘
     vinfo = object_info or build_object_info(sorted({str(v.get("class_type")) for v in graph.values()}))
     if vinfo:
-        errs = _kapp_validate(graph, decls, vinfo)
+        errs, warns = _kapp_validate(graph, decls, vinfo)
         if errs:
             head = errs[:8]
             more = "" if len(errs) <= 8 else "（另有 %d 个问题）" % (len(errs) - 8)
@@ -986,7 +986,7 @@ def pack_app(source: str, params: list, name: str = None, desc: str = "") -> dic
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(kapp, f, ensure_ascii=False, indent=1)
     return {"ok": True, "file": _rel(out_path), "param_count": len(kparams),
-            "node_count": len(graph), "outputs": outputs}
+            "node_count": len(graph), "outputs": outputs, "warnings": warns}
 
 
 # ---------------------------------------------------------------- kapp 打包面板专用（只校验 + 落盘）
@@ -996,25 +996,26 @@ def pack_app(source: str, params: list, name: str = None, desc: str = "") -> dic
 # 直接把成品 kapp 发过来。所以这里只做校验 + 落盘，不再翻译、不再碰工作流文件。
 # 桥接仍是纯通道：声明是什么就是什么，不针对任何应用做特判。
 
-def _kapp_validate(graph: dict, params: list, object_info: dict) -> list:
-    """kapp 落盘前的完整性校验（打包面板 / 服务端打包共用）。返回错误列表（空 = 通过）。
+def _kapp_validate(graph: dict, params: list, object_info: dict):
+    """kapp 落盘前的完整性校验（打包面板 / 服务端打包共用）。返回 (errs, warns)。
 
-    三个已确认的问题，全部在这里拦截（如实报错，不静默落一个坏包）：
-      1. 画布上「转换为输入」的 widget 连线悬空 → graphToPrompt 把整个输入键丢掉
-         （Z-IMAGE 的 width/height 就这么没的），参数还在面板上能勾；
-      2. 参数勾在了连线上 → 运行时注值要么报「没有这个输入名」，要么把连线写死；
-      3. 打包时画布是半成品 → 上游节点缺失，必需输入整键消失
-         （克莱因双图编辑的 VAEDecode.samples）。
-    规则与 ComfyUI 自己的 prompt 校验同标准：必需输入必须在位、连线目标必须存在、
-    槽号必须小于上游 RETURN_TYPES 长度。widget 声明解析不了的跳过（不自造误报）。
+    errs = 确定性的坏包，落盘前拦截；warns = 只是可能有问题，允许打包。
+    拦截的（与 ComfyUI 自己的 prompt 校验同标准，运行时必挂）：
+      1. 节点类型未注册；
+      2. 连线指向不存在的节点 / 槽号越界；
+      3. 参数勾在了悬空连线上（运行时注值必失败）。
+    降级为提醒的（2026-09-28，用户实测 TextEncodeQwenImageEdit21 的 images 不连也能跑）：
+      「缺必需输入」——很多节点对缺失输入有默认值或容错，打包时静态判断不了运行时行为，
+      一刀切会误伤（ComfyUI 运行时自己会给出权威报错，到时再连也不迟）。
     """
     errs = []
+    warns = []
     # 1) 节点类型必须已注册
     for nid, node in graph.items():
         ct = str(node.get("class_type") or "")
         if ct not in object_info:
             errs.append("节点 %s（%s）的类型未注册（插件没装或没重启生效）" % (nid, ct or "?"))
-    # 2) 逐节点：连线目标存在、槽号合法、必需输入在位
+    # 2) 逐节点：连线目标存在、槽号合法；缺必需输入降级为提醒
     for nid, node in graph.items():
         ct = str(node.get("class_type") or "")
         info = object_info.get(ct)
@@ -1041,7 +1042,8 @@ def _kapp_validate(graph: dict, params: list, object_info: dict) -> list:
                 continue
             if not (isinstance(spec, (list, tuple)) and spec):
                 continue        # 声明解析不了的不强求，避免自造误报
-            errs.append("节点 %s（%s）缺必需输入 %s —— 打包时画布上它是悬空连线或上游缺失" % (nid, ct, wname))
+            warns.append("节点 %s（%s）缺输入 %s —— 多数节点能容错；若运行时报缺这个输入，"
+                         "回画布连上再重新打包一次" % (nid, ct, wname))
     # 3) 参数必须指向图中真实存在的「普通输入」（不能是连线）
     for p in (params or []):
         if not isinstance(p, dict):
@@ -1061,7 +1063,7 @@ def _kapp_validate(graph: dict, params: list, object_info: dict) -> list:
             errs.append("参数「%s」（%s:%s）在画布上是连线（来自节点 %s），不能作为可调参数；"
                         "要暴露它请在画布上把该输入转回普通输入（右键节点 → 转换为输入的反向操作）后重新打包"
                         % (shown, nid, wname, val[0]))
-    return errs
+    return errs, warns
 
 
 def save_kapp(name: str, desc, kapp) -> dict:
@@ -1105,7 +1107,7 @@ def save_kapp(name: str, desc, kapp) -> dict:
     # 完整性校验：坏图坚决不落盘，把问题在人能看懂的地方说清楚
     vinfo = build_object_info(sorted({str(v.get("class_type")) for v in graph.values()})) if _NODE_MAP else {}
     if vinfo:
-        errs = _kapp_validate(graph, params, vinfo)
+        errs, warns = _kapp_validate(graph, params, vinfo)
         if errs:
             head = errs[:8]
             more = "" if len(errs) <= 8 else "（另有 %d 个问题）" % (len(errs) - 8)
@@ -1124,7 +1126,7 @@ def save_kapp(name: str, desc, kapp) -> dict:
     except Exception as e:                        # noqa: BLE001
         return {"ok": False, "error": "写入失败：%s" % e}
     return {"ok": True, "file": _rel(out_path), "param_count": len(params),
-            "node_count": len(graph)}
+            "node_count": len(graph), "warnings": warns}
 
 
 # ---------------------------------------------------------------- 路由
@@ -1213,10 +1215,13 @@ if _HAS_COMFY:
 # （拒绝绝对路径与 ..），input 找不到会再试 output —— 保证工作流文件可移植、
 # ComfyUI 的目录保护仍然管用。
 #
-# 输出：选几张就几路 IMAGE（最多 IMG_SLOTS 路），由前端按数量重建；
+# 输出：选几张就几路 IMAGE，上限 IMG_SLOTS 路（2026-09-28 从 10 提到 50 —— 用户要「不再限制数量」）。
+# ComfyUI 的 RETURN_TYPES 必须静态声明，所以「不限制」只能体现为给一个足够大的上限；
+# 实际露出几个由前端 syncOutputs 按需控制（初始 1 个、连一个露一个），上限调大不影响界面。
+# 注意 load() 里不足的槽是复用最后一个 tensor 的**引用**，不额外占显存。
 # 空槽给 None，不抛异常 —— ComfyUI 会把所有输出都算一遍哪怕没接线。
 
-IMG_SLOTS = 10
+IMG_SLOTS = 50
 IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")
 
 
@@ -1241,9 +1246,20 @@ def _media_state_value(value) -> dict:
             value = json.loads(value)
         except (TypeError, ValueError):
             value = {}
-    out = {"images": []}
+    out = {"images": [], "batch": False, "cursor": 0, "select": False, "picked": []}
     if not isinstance(value, dict):
         return out
+    # 批次模式字段（2026-09-28）：batch 开关 + 游标，前端批次循环时逐份改 cursor 再排队
+    out["batch"] = bool(value.get("batch"))
+    try:
+        out["cursor"] = int(value.get("cursor") or 0)
+    except (TypeError, ValueError):
+        out["cursor"] = 0
+    # 选择模式字段（2026-09-28）：select 开关 + 按选择顺序排列的文件名列表
+    out["select"] = bool(value.get("select"))
+    pk = value.get("picked")
+    if isinstance(pk, list):
+        out["picked"] = [str(x).replace("\\", "/").lstrip("/") for x in pk if str(x).strip()]
     raw_list = value.get("images")
     if not isinstance(raw_list, list):
         return out
@@ -1309,7 +1325,10 @@ class KedouImageLoader:
     FUNCTION = "load"
     RETURN_TYPES = ("IMAGE",) * IMG_SLOTS
     RETURN_NAMES = tuple("image_%d" % i for i in range(1, IMG_SLOTS + 1))
-    DESCRIPTION = ("在面板上挑图片（可多选、可上传），一张图一路 IMAGE 输出，最多 %d 张。" % IMG_SLOTS)
+    DESCRIPTION = ("在面板上挑图片（可多选、可上传），一张图一路 IMAGE 输出（上限 %d 路）。"
+                   "未启用的槽输出 None，下游多图节点会忽略该路；"
+                   "开「选择」可从面板上按点击顺序挑选要输出的照片；"
+                   "开「批次」并点「跑 N 张」可让这些图从图片1 依次自动跑完。" % IMG_SLOTS)
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -1327,6 +1346,11 @@ class KedouImageLoader:
                 sig.append((name, st.st_mtime_ns, st.st_size))
             except (OSError, ValueError):
                 sig.append((name, None, None))
+        # 批次游标必须进签名：cursor 变了文件没变，不加的话 ComfyUI 会拿缓存不重跑
+        if state.get("batch"):
+            sig.append(("batch", state.get("cursor")))
+        # 选择模式同理：开关切换、选中集合变化、甚至只改选择顺序，输出都会变，都要进签名
+        sig.append(("select", state.get("select"), tuple(state.get("picked") or [])))
         return repr(sig)
 
     @classmethod
@@ -1341,30 +1365,48 @@ class KedouImageLoader:
 
     def load(self, media_state=""):
         state = _media_state_value(media_state)
-        out = []
-        used = []
-        for entry in state["images"]:
-            try:
-                out.append(_load_image(entry["filename"]))
-                used.append(os.path.basename(entry["filename"]))
-            except (OSError, ValueError) as e:
-                print("[kedou] 图片读不出来，这一路给空：%s（%s）" % (entry["filename"], e))
-                out.append(None)
-        out = [x for x in out if x is not None]
-        if not out:
-            # 无可用图片：抛出明确错误（下游收到 None 会触发 NoneType 属性错误）
-            raise ValueError("蝌蚪图片加载器：没有可用的图片 —— 请在加载器/应用面板里先选择图片")
-        # 空槽复用最后一张：多槽语义为「第 N 张图」，图片不足时复用末张以避免下游
-        # 因 None 报错；控制台会打印实际复用的槽位。
-        last = out[-1]
-        while len(out) < IMG_SLOTS:
-            out.append(last)
-        if len(used) < IMG_SLOTS:
-            print("[kedou] 图片加载器：%d 张（%s）—— 输出槽 %d~%d 复用最后一张"
-                  % (len(used), ("；".join(used)) if used else "（全空）",
-                     len(used) + 1, IMG_SLOTS))
+        # 临时诊断（定位批次 cursor 丢失用，查完删）：打印每次执行实际收到的 media_state
+        print("[kedou] load 收到 media_state：", str(media_state or "")[:260])
+        # 槽位语义（2026-09-28 六修）：**启用槽 = 面板上的实际照片数**。
+        # 多余的槽输出 None —— 下游多图节点（如 TextEncodeQwenImageEdit21 固定 21 个图输入）
+        # 对 None 容错并忽略该路参考图。旧版「复用最后一张填满」会让下游收到 N 份相同
+        # 参考图，参考图权重翻倍、生成效果跑偏（用户实测），已废弃。
+        # 批次模式：只有图片1 输出当前游标那张，其余槽全部 None（连着的线等于忽略信号）。
+        # 加载失败的图也占位为 None：槽与面板序号一一对应，不会前移错位。
+        # 选择模式（2026-09-28）：select 开 + picked 非空 → 只输出被选中的照片，
+        # 顺序 = 选择顺序（picked[0] → 图片1）。picked 里已不在面板上的文件名自动跳过；
+        # picked 为空或全失效时回退为全部照片，避免「选了又全取消」后一个槽都不出。
+        imgs = state["images"]
+        if state.get("select") and state.get("picked"):
+            by_name = {e["filename"]: e for e in imgs}
+            picked_imgs = [by_name[f] for f in state["picked"] if f in by_name]
+            if picked_imgs:
+                imgs = picked_imgs
+        if state.get("batch"):
+            if not imgs:
+                raise ValueError("蝌蚪图片加载器：没有可用的图片 —— 请在加载器/应用面板里先选择图片")
+            cur = max(0, min(int(state.get("cursor") or 0), len(imgs) - 1))
+            entry = imgs[cur]
+            pick = _load_image(entry["filename"])
+            print("[kedou] 批次 %d/%d：%s" % (cur + 1, len(imgs), entry["filename"]))
+            out = [pick]
         else:
-            print("[kedou] 图片加载器：%d 张 —— %s" % (len(used), "；".join(used)))
+            out = []
+            for entry in imgs:
+                try:
+                    out.append(_load_image(entry["filename"]))
+                except (OSError, ValueError) as e:
+                    print("[kedou] 图片读不出来，该槽给空：%s（%s）" % (entry["filename"], e))
+                    out.append(None)
+            if not any(x is not None for x in out):
+                # 全都读不出来才算无图；个别失败只空对应槽，不前移错位
+                raise ValueError("蝌蚪图片加载器：没有可用的图片 —— 请在加载器/应用面板里先选择图片")
+            ok = sum(1 for x in out if x is not None)
+            print("[kedou] 图片加载器：%d/%d 张有效；未启用槽输出 None（下游多图节点会忽略）"
+                  % (ok, IMG_SLOTS))
+        # 填充到 IMG_SLOTS：未启用的槽一律 None
+        while len(out) < IMG_SLOTS:
+            out.append(None)
         return tuple(out)
 
 
@@ -1386,6 +1428,10 @@ MEDIA_EXTS = {
     "audio": (".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac"),
 }
 MEDIA_CAP = 400          # 单次最多返回多少条（上千条对选择器没意义还占带宽）
+# 遍历时的收集上限，防目录爆炸；**排序完成后**再按 MEDIA_CAP 截断。
+# 2026-09-28 修：以前是用 MEDIA_CAP 在循环里就 break，等于「先收满 400 再排序」，
+# 排序只在碰巧遍历到的那 400 个里生效 —— 「最新在前」是假的（实测返回里混着去年的图）。
+MEDIA_SCAN_CAP = 5000
 
 
 def _media_dirs():
@@ -1427,9 +1473,9 @@ def list_media(mtype="image", tab="all", q="", cap=MEDIA_CAP):
                     "url": "/view?filename=%s&subfolder=%s&type=%s" % (
                         _up.quote(fn), _up.quote(sub), tab_name),
                 })
-                if len(items) >= cap:
+                if len(items) >= MEDIA_SCAN_CAP:
                     break
-            if len(items) >= cap:
+            if len(items) >= MEDIA_SCAN_CAP:
                 break
     items.sort(key=lambda x: x["mtime"], reverse=True)
     return items[:cap]
